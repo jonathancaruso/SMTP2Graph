@@ -8,6 +8,9 @@ import { ConfidentialClientApplication } from '@azure/msal-node';
 import { Config } from './Config';
 import { UnrecoverableError } from './Constants';
 import { MsalProxy } from './MsalProxy';
+import { prefixedLog } from './Logger';
+
+const log = prefixedLog('Mailer');
 
 export class MailboxAccessDenied extends UnrecoverableError { }
 export class InvalidMailContent extends UnrecoverableError { }
@@ -133,6 +136,9 @@ export class Mailer
                     else
                         wait *= 2;
 
+                    // Visible in the log on purpose: a send that fails right after
+                    // one of these is a retry problem, not a message problem.
+                    log('warn', `Graph responded ${error.response.status}, retrying in ${wait}ms (attempt ${retryCount} of ${retryLimit})`, {status: error.response.status, retryCount, wait});
                     await this.#sleep(wait);
 
                     return retry();
