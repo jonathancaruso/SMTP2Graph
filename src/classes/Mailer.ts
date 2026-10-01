@@ -48,10 +48,16 @@ export class Mailer
             // Fetch an accesstoken if needed
             const token = await this.#aquireToken();
 
-            // Send the message
-            const readStream = fs.createReadStream(filePath);
-            try {
-                await this.#retryableRequest({
+            // Send the message. The body is a stream, which can only be consumed
+            // once, so every attempt (including a retry after throttling) gets a
+            // fresh one. Re-using the first stream sent an empty body on retry,
+            // which Graph rejects as ErrorMimeContentInvalidBase64String; the mail
+            // then looked unrecoverable and sat in the queue until a restart (#39).
+            let readStream: fs.ReadStream|undefined;
+            const createRequest = (): AxiosRequestConfig => {
+                readStream?.destroy();
+                readStream = fs.createReadStream(filePath);
+                return {
                     method: 'post',
                     url: `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`,
                     data: readStream.pipe(new Base64Encode()),
@@ -61,7 +67,10 @@ export class Mailer
                         'User-Agent': `SMPT2Graph/${VERSION}`,
                     },
                     proxy: Config.httpProxyConfig,
-                });
+                };
+            };
+            try {
+                await this.#retryableRequest(createRequest);
             } catch(error: any) {
                 if(isAxiosError(error) && error.response?.data)
                 {
@@ -83,13 +92,17 @@ export class Mailer
                 else
                     throw error;
             } finally {
-                readStream.destroy();
+                readStream?.destroy();
             }
         });
     }
 
-    /** Automatically retry a request when it's being throttled by the Graph API */
-    static async #retryableRequest<RequestData = any, ReponseData = any>(request: AxiosRequestConfig<RequestData>): Promise<AxiosResponse<RequestData, ReponseData>>
+    /**
+     * Automatically retry a request when it's being throttled by the Graph API.
+     * @param createRequest Called once per attempt, so a request whose body is a
+     * stream can hand out a fresh stream each time (a consumed stream sends nothing).
+     */
+    static async #retryableRequest<RequestData = any, ReponseData = any>(createRequest: ()=>AxiosRequestConfig<RequestData>): Promise<AxiosResponse<RequestData, ReponseData>>
     {
         const retryLimit = 3;
         let retryCount = 0;
@@ -103,7 +116,7 @@ export class Mailer
 
             try {
                 return await axios({
-                    ...request,
+                    ...createRequest(),
                     signal: abortController.signal,
                     onUploadProgress: progress=>{
                         clearTimeout(connectTimeout);
